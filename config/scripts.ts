@@ -35,41 +35,10 @@ type TemplateFunction = (vars: TemplateVars, flags?: TemplateFlags) => string;
 export const TPL: Record<string, TemplateFunction> = {
   /**
    * 1. INTERESTED - When They're Interested
+   * Simple acknowledgment - team will manually send agreement
    */
   INTERESTED: (vars: TemplateVars) => {
-    // Handle role and location for the question
-    // Priority: role (explicit) > role1 (inferred) > role2 (inferred) > default
-    const role = vars.role || vars.role1;
-    const role2 = vars.role2;
-    const location = vars.location ? ` in ${vars.location}` : '';
-    
-    // Build the role question part
-    let roleQuestion = '';
-    
-    // If we have both role1 and role2 (inferred roles), ask about both
-    if (role && role2 && role !== role2) {
-      roleQuestion = `Also, is this for the ${role}${location}, or the ${role2}${location}?`;
-    }
-    // If we have a single role (explicit or inferred)
-    else if (role) {
-      if (location) {
-        roleQuestion = `Also, is this for the ${role}${location}, or are there any other positions you're hiring for right now?`;
-      } else {
-        roleQuestion = `Also, is this for the ${role}, or are there any other positions you're hiring for right now?`;
-      }
-    }
-    // If no role information at all
-    else {
-      roleQuestion = `Also, are there any other positions you're hiring for right now?`;
-    }
-    
-    return `Great — happy to get those over to you.
-
-Just so you have everything upfront: our terms are a flat 10% of the first year's salary with a full 6-month replacement guarantee.
-
-I'll send over the agreement for e-signature first so we can include full candidate details without redactions. Any questions before I send?
-
-${roleQuestion}`;
+    return `Thank you for your interest! We'll send the agreement shortly.`;
   },
 
   /**
