@@ -341,6 +341,103 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
       return;
     }
 
+    // 4.3. SPECIAL HANDLING: INTERESTED template - simple acknowledgment + Slack notification
+    // Skip normal flow, send simple email, notify team for manual agreement sending
+    if (classification.template_id === 'INTERESTED') {
+      console.log(`INTERESTED template detected - sending acknowledgment and Slack notification: thread_id=${effectiveThreadId}`);
+      
+      // Get simple acknowledgment email template
+      const replyText = getScript('INTERESTED', {}, {});
+      
+      // Send acknowledgment email
+      try {
+        // Build threading information
+        let inReplyTo: string | undefined;
+        let references: string[] = [];
+        let originalMessageId: string | undefined;
+
+        if (latestMessage) {
+          inReplyTo = latestMessage.messageId || latestMessage.id;
+          originalMessageId = latestMessage.originalMessageId || effectiveThreadId;
+          
+          if (latestMessage.references) {
+            if (Array.isArray(latestMessage.references)) {
+              if (latestMessage.references.length > 0 && typeof latestMessage.references[0] === 'string' && latestMessage.references[0].includes(' ')) {
+                references = latestMessage.references[0].split(' ').filter((ref: string) => ref.trim().length > 0);
+              } else {
+                references = latestMessage.references.filter((ref: any) => typeof ref === 'string' && ref.trim().length > 0);
+              }
+            } else if (typeof latestMessage.references === 'string') {
+              references = latestMessage.references.split(' ').filter((ref: string) => ref.trim().length > 0);
+            }
+          }
+          
+          if (inReplyTo && !references.includes(inReplyTo)) {
+            references.push(inReplyTo);
+          }
+        } else {
+          inReplyTo = message_id;
+          originalMessageId = effectiveThreadId;
+          references = message_id ? [message_id] : [];
+          if (effectiveThreadId && !references.includes(effectiveThreadId)) {
+            references.unshift(effectiveThreadId);
+          }
+        }
+
+        if (!email_account) {
+          throw new Error('email_account is required to send email');
+        }
+
+        const toEmail = lead_email || threadFrom;
+        if (!toEmail || !toEmail.trim()) {
+          throw new Error('Recipient email address is required for sending the reply');
+        }
+
+        // Add bot marker to email body
+        const botMarker = '\n\n<!-- X-Autobot: alphahire-v1 -->';
+        const replyTextWithMarker = replyText + botMarker;
+
+        await sendEmail({
+          from: email_account,
+          to: toEmail,
+          subject: threadSubject.startsWith('Re:') ? threadSubject : `Re: ${threadSubject}`,
+          body: replyTextWithMarker,
+          inReplyTo: inReplyTo,
+          references: references,
+          originalMessageId: originalMessageId,
+        });
+        console.log(`INTERESTED acknowledgment sent successfully: thread_id=${effectiveThreadId}`);
+        
+        // Increment auto-replies sent counter
+        incrementAutoRepliesSent(effectiveThreadId);
+        setLastTemplateId(effectiveThreadId, 'INTERESTED');
+      } catch (error: any) {
+        console.error('Failed to send INTERESTED acknowledgment:', error);
+        res.status(500).json({ error: 'Failed to send acknowledgment' });
+        return;
+      }
+
+      // Send Slack notification: "Agreement requested"
+      await sendAlert(`📋 Agreement requested`, {
+        event: 'agreement_requested',
+        thread_id: effectiveThreadId,
+        message_id,
+        lead_email,
+        lead_name,
+        lead_company,
+        template_id: 'INTERESTED',
+      });
+
+      // Mark message as processed and return
+      markProcessed(message_id);
+      res.status(200).json({
+        message: 'INTERESTED - acknowledgment sent, agreement requested notification sent to Slack',
+        template_id: 'INTERESTED',
+        agreement_requested: true,
+      });
+      return;
+    }
+
     // 4.3. Convert classification to confidence system format
     const classificationForConfidence: Classification = {
       template_id: classification.template_id,
@@ -435,7 +532,8 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
     }
 
     // 4.9. If confidence decision says NO, send manual review alert and stop
-    if (!decision.okToAutoRespond) {
+    // EXCEPTION: Skip manual review alerts for INTERESTED (already handled above)
+    if (!decision.okToAutoRespond && template_id !== 'INTERESTED') {
       console.log(`Confidence check failed: confidence=${decision.confidence.toFixed(2)}, blocking reasons: ${decision.blockingReasons.join(', ')}`);
       
       // Send manual review Slack alert with new format
@@ -685,7 +783,8 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
 
     // 12. Send E-Signature if Required (with guardrails)
     // PRIORITY: Send agreements at any cost - only block if explicitly already sent
-    if (AUTO_SEND_TEMPLATES.has(template_id)) {
+    // EXCEPTION: INTERESTED template is handled separately above - never send agreement here
+    if (AUTO_SEND_TEMPLATES.has(template_id) && template_id !== 'INTERESTED') {
       // Check if agreement was already sent for this thread - but allow if they explicitly ask again
       const explicitlyAskingAgain = decision.normalizedSignals.includes('send_agreement' as Signal) || 
                                      decision.normalizedSignals.includes('asks_for_agreement' as Signal) ||
@@ -807,27 +906,27 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
           // Final recipient (use corrected if needed)
           const finalRecipientEmail = recipientEmail === email_account ? (lead_email || lastFromEmail || '') : recipientEmail;
           
-          await sendAgreement({
+        await sendAgreement({
             clientEmail: finalRecipientEmail,
-            clientName: lead_name,
-            companyName: lead_company,
-          });
-          console.log(`Agreement sent successfully: template_id=${template_id}, thread_id=${effectiveThreadId}`);
+          clientName: lead_name,
+          companyName: lead_company,
+        });
+        console.log(`Agreement sent successfully: template_id=${template_id}, thread_id=${effectiveThreadId}`);
           
           // Mark agreement as sent IMMEDIATELY after successful send (before any other processing)
           // This ensures the hard stop in confidence system will work for subsequent messages
           markAgreementSent(effectiveThreadId);
-          
-          // Agreement sent alert: Success case
-          await sendAlert(`📄 Agreement sent successfully: ${template_id}`, {
-            event: 'agreement_sent',
-            thread_id: effectiveThreadId,
-            message_id,
-            template_id,
-            lead_email,
-            lead_name,
-            lead_company,
-          });
+        
+        // Agreement sent alert: Success case
+        await sendAlert(`📄 Agreement sent successfully: ${template_id}`, {
+          event: 'agreement_sent',
+          thread_id: effectiveThreadId,
+          message_id,
+          template_id,
+          lead_email,
+          lead_name,
+          lead_company,
+        });
 
           // Send follow-up email after agreement is sent (for YES_SEND and ASK_AGREEMENT)
           if (template_id === 'YES_SEND' || template_id === 'ASK_AGREEMENT') {
@@ -897,8 +996,8 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
               // Don't fail the whole request if follow-up email fails, just log
             }
           }
-        } catch (error: any) {
-          console.error('Failed to send agreement:', error);
+      } catch (error: any) {
+        console.error('Failed to send agreement:', error);
           // Removed Slack notification - client wants only agreement sent (success) and manual review alerts
           // Don't fail the whole request if e-sign fails, just log
         }
