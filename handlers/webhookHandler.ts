@@ -531,27 +531,11 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
       return;
     }
 
-    // 4.9. If confidence decision says NO, send manual review alert and stop
-    // EXCEPTION: Skip manual review alerts for INTERESTED (already handled above)
+    // 4.9. If confidence decision says NO, stop silently (no Slack alerts)
+    // NOTE: Client request - only send Slack notification for "agreement requested"
     if (!decision.okToAutoRespond && template_id !== 'INTERESTED') {
       console.log(`Confidence check failed: confidence=${decision.confidence.toFixed(2)}, blocking reasons: ${decision.blockingReasons.join(', ')}`);
-      
-      // Send manual review Slack alert with new format
-      await sendAlert(`🟡 Manual Review (confidence ${decision.confidence.toFixed(2)})`, {
-        event: 'manual_review',
-        thread_id: effectiveThreadId,
-        message_id,
-        lead_email,
-        lead_name,
-        lead_company,
-        predicted_template_id: template_id,
-        confidence: decision.confidence,
-        blocking_reasons: decision.blockingReasons,
-        normalized_signals: decision.normalizedSignals,
-        snippet: messageText.substring(0, 200),
-        suggested_next_step: `Manual reply needed: ${decision.blockingReasons.join(', ')}`,
-      });
-
+      // Slack manual review alerts are disabled - client wants only "agreement requested" notifications
       res.status(200).json({
         message: 'Manual review required - confidence below threshold',
         template_id,
@@ -568,7 +552,7 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
     // 4.6. Handle WRONG_PERSON_NO_CONTACT - Do not send reply, alert for manual review
     if (template_id === 'WRONG_PERSON_NO_CONTACT') {
       console.log(`Wrong person, no contact provided, skipping reply: message_id=${message_id}`);
-      // Commented out - client wants only agreement sent notifications
+      // Commented out - client wants only "agreement requested" notifications in Slack
       // await sendAlert(`⚠️ Manual Review Required: Wrong person, no contact provided`, {
       //   event: 'manual_review',
       //   thread_id: effectiveThreadId,
@@ -604,19 +588,7 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
           normalizedContactEmail === normalizedSenderEmail) {
         // Same email bug detected - this should have been caught by confidence system, but double-check
         console.log(`Same email bug detected: contact_email=${contactEmail}, lead_email=${lead_email}, sender_email=${senderEmail}`);
-        await sendAlert(`🟡 Manual Review (confidence ${decision.confidence.toFixed(2)})`, {
-          event: 'manual_review',
-          thread_id: effectiveThreadId,
-          message_id,
-          lead_email,
-          lead_name,
-          lead_company,
-          predicted_template_id: 'WRONG_PERSON_NO_CONTACT',
-          confidence: decision.confidence,
-          blocking_reasons: ['Contact email same as lead/sender email'],
-          normalized_signals: decision.normalizedSignals,
-          snippet: messageText.substring(0, 200),
-        });
+        // Slack manual review alerts are disabled - client wants only "agreement requested" notifications
         res.status(200).json({
           message: 'Wrong person - same email detected, manual review required',
           template_id: 'WRONG_PERSON_NO_CONTACT',
@@ -917,17 +889,6 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
           // This ensures the hard stop in confidence system will work for subsequent messages
           markAgreementSent(effectiveThreadId);
         
-        // Agreement sent alert: Success case
-        await sendAlert(`📄 Agreement sent successfully: ${template_id}`, {
-          event: 'agreement_sent',
-          thread_id: effectiveThreadId,
-          message_id,
-          template_id,
-          lead_email,
-          lead_name,
-          lead_company,
-        });
-
           // Send follow-up email after agreement is sent (for YES_SEND and ASK_AGREEMENT)
           if (template_id === 'YES_SEND' || template_id === 'ASK_AGREEMENT') {
             try {
