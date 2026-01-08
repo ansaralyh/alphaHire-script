@@ -4,7 +4,6 @@
  */
 
 import { Request, Response } from 'express';
-import { sendAlert, sendErrorAlert } from '../api/slack';
 
 /**
  * Handle SignWell webhook events
@@ -23,27 +22,12 @@ export async function handleSignWellWebhook(req: Request, res: Response): Promis
       case 'document.signed':
       case 'document.completed':
         console.log(`Document signed/completed: ${document_id} by ${signer_email}`);
-        
-        await sendAlert(`✅ Agreement signed: ${document_name || document_id}`, {
-          event: 'document_signed',
-          document_id,
-          document_name,
-          signer_email,
-          signer_name,
-          status,
-        });
+        // Slack notifications disabled per client request (only "agreement requested" should go to Slack)
         break;
 
       case 'document.declined':
         console.log(`Document declined: ${document_id} by ${signer_email}`);
-        
-        await sendAlert(`❌ Agreement declined: ${document_name || document_id}`, {
-          event: 'document_declined',
-          document_id,
-          document_name,
-          signer_email,
-          signer_name,
-        });
+        // Slack notifications disabled per client request (only "agreement requested" should go to Slack)
         break;
 
       case 'document.viewed':
@@ -64,11 +48,7 @@ export async function handleSignWellWebhook(req: Request, res: Response): Promis
     });
   } catch (error: any) {
     console.error('Error processing SignWell webhook:', error);
-    await sendErrorAlert('Failed to process SignWell webhook', {
-      event: 'error',
-      error: error.message,
-      stack: error.stack,
-    });
+    // Slack error alerts disabled per client request (only "agreement requested" should go to Slack)
     res.status(500).json({ error: 'Internal server error' });
   }
 }
