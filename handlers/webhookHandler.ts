@@ -437,6 +437,118 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
       return;
     }
 
+    // 4.3.1. SPECIAL HANDLING: YES_SEND and ASK_AGREEMENT templates - Manual review required
+    // Since Signwell is disabled, these require manual agreement sending
+    // Send acknowledgment email saying "we will be sending soon" + Slack alert
+    if (classification.template_id === 'YES_SEND' || classification.template_id === 'ASK_AGREEMENT') {
+      console.log(`Agreement requested (${classification.template_id}) - Signwell disabled, sending acknowledgment email and Slack alert: thread_id=${effectiveThreadId}`);
+      
+      // Get acknowledgment email text (says "we will be sending soon" not "we sent")
+      let replyText: string;
+      if (classification.template_id === 'YES_SEND') {
+        replyText = `Perfect — I'll be sending the agreement over shortly for e-signature.
+
+Once that's in place, we'll be able to share full candidate details without redactions and keep things moving quickly.
+
+If anyone else (HR, hiring manager, or a co-founder) needs to be looped in for future updates, feel free to reply here and I'll include them.`;
+      } else {
+        // ASK_AGREEMENT
+        replyText = `Absolutely — I'll be sending the agreement over shortly to this email for e-signature.
+
+If anyone else needs to be included (HR, hiring manager, co-founder), feel free to reply here and I'll add them to future communication.`;
+      }
+      
+      // Send acknowledgment email
+      try {
+        // Build threading information
+        let inReplyTo: string | undefined;
+        let references: string[] = [];
+        let originalMessageId: string | undefined;
+
+        if (latestMessage) {
+          inReplyTo = latestMessage.messageId || latestMessage.id;
+          originalMessageId = latestMessage.originalMessageId || effectiveThreadId;
+          
+          if (latestMessage.references) {
+            if (Array.isArray(latestMessage.references)) {
+              if (latestMessage.references.length > 0 && typeof latestMessage.references[0] === 'string' && latestMessage.references[0].includes(' ')) {
+                references = latestMessage.references[0].split(' ').filter((ref: string) => ref.trim().length > 0);
+              } else {
+                references = latestMessage.references.filter((ref: any) => typeof ref === 'string' && ref.trim().length > 0);
+              }
+            } else if (typeof latestMessage.references === 'string') {
+              references = latestMessage.references.split(' ').filter((ref: string) => ref.trim().length > 0);
+            }
+          }
+          
+          if (inReplyTo && !references.includes(inReplyTo)) {
+            references.push(inReplyTo);
+          }
+        } else {
+          inReplyTo = message_id;
+          originalMessageId = effectiveThreadId;
+          references = message_id ? [message_id] : [];
+          if (effectiveThreadId && !references.includes(effectiveThreadId)) {
+            references.unshift(effectiveThreadId);
+          }
+        }
+
+        if (!email_account) {
+          throw new Error('email_account is required to send email');
+        }
+
+        const toEmail = lead_email || threadFrom;
+        if (!toEmail || !toEmail.trim()) {
+          throw new Error('Recipient email address is required for sending the reply');
+        }
+
+        // Add bot marker to email body
+        const botMarker = '\n\n<!-- X-Autobot: alphahire-v1 -->';
+        const replyTextWithMarker = replyText + botMarker;
+
+        await sendEmail({
+          from: email_account,
+          to: toEmail,
+          subject: threadSubject.startsWith('Re:') ? threadSubject : `Re: ${threadSubject}`,
+          body: replyTextWithMarker,
+          inReplyTo: inReplyTo,
+          references: references,
+          originalMessageId: originalMessageId,
+        });
+        console.log(`${classification.template_id} acknowledgment sent successfully: thread_id=${effectiveThreadId}`);
+        
+        // Increment auto-replies sent counter
+        incrementAutoRepliesSent(effectiveThreadId);
+        setLastTemplateId(effectiveThreadId, classification.template_id);
+      } catch (error: any) {
+        console.error(`Failed to send ${classification.template_id} acknowledgment:`, error);
+        res.status(500).json({ error: 'Failed to send acknowledgment' });
+        return;
+      }
+      
+      // Send Slack notification: "Agreement requested - Manual review needed"
+      await sendAlert(`📋 Agreement requested - Manual review needed (Signwell disabled)`, {
+        event: 'agreement_requested',
+        thread_id: effectiveThreadId,
+        message_id,
+        lead_email,
+        lead_name,
+        lead_company,
+        template_id: classification.template_id,
+        note: 'Signwell is disabled - please send agreement manually',
+      });
+
+      // Mark message as processed and return
+      markProcessed(message_id);
+      res.status(200).json({
+        message: `${classification.template_id} - Acknowledgment sent, Slack alert sent for manual review (Signwell disabled)`,
+        template_id: classification.template_id,
+        agreement_requested: true,
+        manual_review: true,
+      });
+      return;
+    }
+
     // 4.3. Convert classification to confidence system format
     const classificationForConfidence: Classification = {
       template_id: classification.template_id,
