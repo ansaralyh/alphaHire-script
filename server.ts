@@ -8,7 +8,8 @@ import express, { Request, Response, NextFunction } from 'express';
 import { getStateStats } from './state/threadState';
 import { config } from './config/env';
 import { handleReachinboxWebhook } from './handlers/webhookHandler';
-import { handleSignWellWebhook } from './handlers/signwellWebhookHandler';
+// Signwell webhook disabled - import removed
+// import { handleSignWellWebhook } from './handlers/signwellWebhookHandler';
 
 // Initialize Express app
 const app = express();
@@ -50,7 +51,8 @@ app.get('/health', (req: Request, res: Response) => {
 
 // Webhook endpoints
 app.post('/webhooks/reachinbox', handleReachinboxWebhook);
-app.post('/webhooks/signwell', handleSignWellWebhook);
+// Signwell webhook disabled - route removed
+// app.post('/webhooks/signwell', handleSignWellWebhook);
 
 // 404 handler for undefined routes
 app.use((req: Request, res: Response) => {
@@ -65,5 +67,6 @@ app.listen(PORT, () => {
   console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`✅ Ready to receive webhooks:`);
   console.log(`   - Reachinbox: http://localhost:${PORT}/webhooks/reachinbox`);
-  console.log(`   - SignWell: http://localhost:${PORT}/webhooks/signwell`);
+  // Signwell webhook disabled
+  // console.log(`   - SignWell: http://localhost:${PORT}/webhooks/signwell`);
 });
