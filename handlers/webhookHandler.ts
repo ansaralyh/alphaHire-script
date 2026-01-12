@@ -7,9 +7,8 @@ import { Request, Response } from 'express';
 import { incrementLoop, isProcessed, markProcessed, getLastTemplateId, setLastTemplateId, getLoopCount, isUnsubscribed, markAsUnsubscribed, getAutoRepliesSent, incrementAutoRepliesSent, isAgreementSent, markAgreementSent, isManualOwner, markAsManualOwner, resetManualOwner, getLockedRoles, addLockedRole, setLockedRoles, getLastFrom, setLastFrom } from '../state/threadState';
 import { fetchThread, getLatestMessage, getMessageText, sendEmail } from '../api/reachinbox';
 import { classifyEmail, EmailMeta } from '../api/openai';
-import { sendAgreement } from '../api/esign';
 import { sendAlert } from '../api/slack';
-import { getScript, requiresESignature, AUTO_SEND_TEMPLATES, getFollowUpEmailText } from '../config/scripts';
+import { getScript, AUTO_SEND_TEMPLATES } from '../config/scripts';
 import { decideAutoRespond, Classification, Signal } from '../src/confidence';
 
 /**
@@ -753,216 +752,14 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
       return;
     }
 
-    // 12. Send E-Signature if Required (with guardrails)
-    // PRIORITY: Send agreements at any cost - only block if explicitly already sent
-    // EXCEPTION: INTERESTED template is handled separately above - never send agreement here
+    // 12. Signwell Agreement Sending - DISABLED
+    // Signwell has been completely disabled per client request.
+    // We only send Slack alerts for "agreement requested" on INTERESTED leads (handled separately above).
+    // All agreement sending via Signwell API and follow-up emails have been removed.
     if (AUTO_SEND_TEMPLATES.has(template_id) && template_id !== 'INTERESTED') {
-      // Check if agreement was already sent for this thread - but allow if they explicitly ask again
-      const explicitlyAskingAgain = decision.normalizedSignals.includes('send_agreement' as Signal) || 
-                                     decision.normalizedSignals.includes('asks_for_agreement' as Signal) ||
-                                     decision.normalizedSignals.includes('send_it' as Signal);
-      
-      // PRIORITY: Check if this is a reply to our follow-up email (prevent duplicate agreement)
-      // If message is very short and just acknowledges the follow-up, don't send agreement again
-      const isShortAcknowledgment = messageText.trim().length < 50 && 
-                                    (messageText.toLowerCase().includes('thanks') || 
-                                     messageText.toLowerCase().includes('thank you') ||
-                                     messageText.toLowerCase().includes('received') ||
-                                     messageText.toLowerCase().includes('got it'));
-      
-      // PRIORITY FIX #16: Atomic check to prevent race conditions - check once and use result
-      const wasAlreadySent = isAgreementSent(effectiveThreadId);
-      
-      if (wasAlreadySent && !explicitlyAskingAgain) {
-        // If it's a short acknowledgment of follow-up, definitely don't send agreement again
-        if (isShortAcknowledgment) {
-          console.log(`Agreement already sent and lead just acknowledging follow-up, skipping duplicate send: thread_id=${effectiveThreadId}`);
-          // Don't send again - exit early to prevent any processing
-          res.status(200).json({
-            message: 'Agreement already sent - acknowledgment received, no duplicate send',
-            template_id,
-            agreement_sent: false,
-          });
-          markProcessed(message_id);
-          return;
-        } else {
-          console.log(`Agreement already sent for thread ${effectiveThreadId}, skipping duplicate send`);
-          // Don't send again, but continue with the rest of the flow
-        }
-      }
-      // If they explicitly ask again, allow it (maybe they didn't receive it)
-      else if (wasAlreadySent && explicitlyAskingAgain && !isShortAcknowledgment) {
-        console.log(`Agreement already sent but lead explicitly asking again, allowing resend: thread_id=${effectiveThreadId}`);
-        // Continue to send agreement below
-      }
-      // If agreement sent and it's just acknowledgment, skip
-      else if (wasAlreadySent && isShortAcknowledgment) {
-        console.log(`Agreement already sent and lead just acknowledging, skipping: thread_id=${effectiveThreadId}`);
-        // Don't send again - exit early
-        res.status(200).json({
-          message: 'Agreement already sent - acknowledgment received, no duplicate send',
-          template_id,
-          agreement_sent: false,
-        });
-        markProcessed(message_id);
-        return;
-      }
-      // Check for blocking signals - PRIORITY: Send agreements at any cost
-      // Only block if they want resume/call first AND not explicitly asking for agreement
-      const explicitlyAskingForAgreement = decision.normalizedSignals.includes('send_agreement' as Signal) || 
-                                           decision.normalizedSignals.includes('asks_for_agreement' as Signal) ||
-                                           decision.normalizedSignals.includes('send_it' as Signal) ||
-                                           template_id === 'YES_SEND' || template_id === 'ASK_AGREEMENT';
-      
-      if (decision.normalizedSignals.includes('wants_resume_first' as Signal) && !explicitlyAskingForAgreement) {
-        console.log(`Lead wants resume first, skipping agreement send: template_id=${template_id}, thread_id=${effectiveThreadId}`);
-        // Don't send agreement - just send the email reply without agreement
-        // Continue to send email reply but skip agreement
-      }
-      else if (decision.normalizedSignals.includes('wants_call_first' as Signal)) {
-        console.log(`Lead wants call first, skipping agreement send: template_id=${template_id}, thread_id=${effectiveThreadId}`);
-        // Don't send agreement - just send the email reply without agreement
-        // Continue to send email reply but skip agreement
-      }
-      else if (decision.normalizedSignals.includes('auto_reply_blank' as Signal)) {
-        console.log(`Blank auto-reply detected, skipping agreement send: template_id=${template_id}, thread_id=${effectiveThreadId}`);
-        // Don't send agreement for blank replies
-        // This should have been caught earlier, but double-check
-      }
-      else if (decision.normalizedSignals.includes('done_all_set' as Signal)) {
-        console.log(`Lead said "all set", skipping agreement send: template_id=${template_id}, thread_id=${effectiveThreadId}`);
-        // Don't send agreement - they're done
-        // This should have been caught earlier, but double-check
-      }
-      else if (decision.normalizedSignals.includes('already_signed' as Signal)) {
-        console.log(`Lead already signed agreement, skipping duplicate send: template_id=${template_id}, thread_id=${effectiveThreadId}`);
-        // Mark as sent to prevent future sends
-        markAgreementSent(effectiveThreadId);
-        // Don't send agreement again - return early to prevent any reply
-        res.status(200).json({
-          message: 'Lead already signed - no agreement sent',
-          template_id,
-          agreement_sent: false,
-        });
-        markProcessed(message_id);
-        return;
-      }
-      // All checks passed - send agreement
-      else {
-        try {
-          // PRIORITY FIX: Use lead_email as primary recipient (the actual lead)
-          // getLastFrom() tracks inbound message senders (should be the lead)
-          // threadFrom might be the sender's email (person sending the mail), not the lead's email
-          // Priority: getLastFrom() (tracked lead) > lead_email (webhook lead) > threadFrom (only if not sender's email)
-          const lastFromEmail = getLastFrom(effectiveThreadId);
-          
-          // CRITICAL: Never use email_account (sender's email) as recipient
-          // If threadFrom equals email_account, it's the sender, not the lead - don't use it
-          const safeThreadFrom = threadFrom && threadFrom !== email_account ? threadFrom : null;
-          
-          const recipientEmail = lastFromEmail || lead_email || safeThreadFrom || '';
-          
-          // Log recipient selection for debugging
-          console.log(`Agreement recipient selected: recipient=${recipientEmail}, lead_email=${lead_email}, lastFrom=${lastFromEmail}, threadFrom=${threadFrom}, email_account=${email_account}`);
-          
-          // Validation: Warn if recipient equals sender's email (this should never happen)
-          if (recipientEmail === email_account) {
-            console.error(`❌ ERROR: Agreement recipient is sender's email! Using lead_email instead. recipient=${recipientEmail}, lead_email=${lead_email}`);
-            // Force use lead_email if recipient is sender's email
-            const correctedRecipient = lead_email || '';
-            if (correctedRecipient) {
-              console.log(`Corrected recipient to lead_email: ${correctedRecipient}`);
-            }
-          }
-          
-          // Final recipient (use corrected if needed)
-          const finalRecipientEmail = recipientEmail === email_account ? (lead_email || lastFromEmail || '') : recipientEmail;
-          
-        await sendAgreement({
-            clientEmail: finalRecipientEmail,
-          clientName: lead_name,
-          companyName: lead_company,
-        });
-        console.log(`Agreement sent successfully: template_id=${template_id}, thread_id=${effectiveThreadId}`);
-          
-          // Mark agreement as sent IMMEDIATELY after successful send (before any other processing)
-          // This ensures the hard stop in confidence system will work for subsequent messages
-          markAgreementSent(effectiveThreadId);
-        
-          // Send follow-up email after agreement is sent (for YES_SEND and ASK_AGREEMENT)
-          if (template_id === 'YES_SEND' || template_id === 'ASK_AGREEMENT') {
-            try {
-            const followUpText = getFollowUpEmailText();
-            
-            // Build threading information for follow-up email (same as main reply)
-            let followUpInReplyTo: string | undefined;
-            let followUpReferences: string[] = [];
-            let followUpOriginalMessageId: string | undefined;
-
-            if (latestMessage) {
-              followUpInReplyTo = latestMessage.messageId || latestMessage.id;
-              followUpOriginalMessageId = latestMessage.originalMessageId || effectiveThreadId;
-              
-              if (latestMessage.references) {
-                if (Array.isArray(latestMessage.references)) {
-                  if (latestMessage.references.length > 0 && typeof latestMessage.references[0] === 'string' && latestMessage.references[0].includes(' ')) {
-                    followUpReferences = latestMessage.references[0].split(' ').filter((ref: string) => ref.trim().length > 0);
-                  } else {
-                    followUpReferences = latestMessage.references;
-                  }
-                } else if (typeof latestMessage.references === 'string') {
-                  if (latestMessage.references.includes(' ')) {
-                    followUpReferences = latestMessage.references.split(' ').filter((ref: string) => ref.trim().length > 0);
-                  } else {
-                    followUpReferences = [latestMessage.references];
-                  }
-                }
-              }
-              
-              if (followUpOriginalMessageId && !followUpReferences.includes(followUpOriginalMessageId)) {
-                followUpReferences.push(followUpOriginalMessageId);
-              }
-              
-              if (followUpInReplyTo && !followUpReferences.includes(followUpInReplyTo)) {
-                followUpReferences.push(followUpInReplyTo);
-              }
-            } else {
-              followUpInReplyTo = message_id;
-              followUpOriginalMessageId = effectiveThreadId;
-              followUpReferences = message_id ? [message_id] : [];
-              if (effectiveThreadId && !followUpReferences.includes(effectiveThreadId)) {
-                followUpReferences.unshift(effectiveThreadId);
-              }
-            }
-            
-            const toEmail = lead_email || threadFrom;
-            if (toEmail && email_account) {
-              // Add bot marker to follow-up email body
-              const botMarker = '\n\n<!-- X-Autobot: alphahire-v1 -->';
-              const followUpTextWithMarker = followUpText + botMarker;
-              
-              await sendEmail({
-                from: email_account,
-                to: toEmail,
-                subject: threadSubject.startsWith('Re:') ? threadSubject : `Re: ${threadSubject}`,
-                body: followUpTextWithMarker,
-                inReplyTo: followUpInReplyTo,
-                references: followUpReferences,
-                originalMessageId: followUpOriginalMessageId,
-              });
-              console.log(`Follow-up email sent successfully after agreement: template_id=${template_id}, thread_id=${effectiveThreadId}`);
-            }
-            } catch (error: any) {
-              console.error('Failed to send follow-up email:', error);
-              // Don't fail the whole request if follow-up email fails, just log
-            }
-          }
-      } catch (error: any) {
-        console.error('Failed to send agreement:', error);
-          // Removed Slack notification - client wants only agreement sent (success) and manual review alerts
-          // Don't fail the whole request if e-sign fails, just log
-        }
-      }
+      console.log(`Signwell disabled: Would have sent agreement for template_id=${template_id}, but Signwell is disabled. Only Slack alerts are sent for INTERESTED leads.`);
+      // Log that we would have sent an agreement but Signwell is disabled
+      // No agreement is sent, no follow-up email is sent
     }
 
     // 13. Store last template_id for this thread (for repeat detection)
@@ -976,7 +773,7 @@ export async function handleReachinboxWebhook(req: Request, res: Response): Prom
       message: 'Webhook processed successfully',
       template_id,
       reply_sent: true,
-      agreement_sent: requiresESignature(template_id),
+      agreement_sent: false, // Signwell disabled - no agreements are sent
     });
   } catch (error: any) {
     console.error('Unexpected error in webhook handler:', error);
